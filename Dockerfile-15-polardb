@@ -41,7 +41,7 @@ ARG age_ref=release/PG15/1.5.0
 ARG polardb_deb_url_amd64=https://github.com/ApsaraDB/PolarDB-for-PostgreSQL/releases/download/v15.14.5.0/PolarDB_15.14.5.0-b4011ae4-ubuntu24.04_amd64.deb
 ARG polardb_deb_url_arm64=https://github.com/ApsaraDB/PolarDB-for-PostgreSQL/releases/download/v15.14.5.0/PolarDB_15.14.5.0-b4011ae4-ubuntu24.04_arm64.deb
 
-FROM ubuntu:noble as base
+FROM ubuntu:noble AS base
 ARG polardb_deb_url_amd64
 ARG polardb_deb_url_arm64
 ARG TARGETARCH
@@ -163,13 +163,11 @@ RUN apt-get update && \
     cmake 
 
 ENV PGDATA=/var/lib/postgresql/data
-RUN mkdir -p ${PGDATA}/polar_cache_trash \
-    && chown postgres:postgres ${PGDATA}/polar_cache_trash
 
 ####################
 # setup-wal-g.yml
 ####################
-FROM base as walg
+FROM base AS walg
 ARG wal_g_release
 WORKDIR /nixpg
 
@@ -182,7 +180,7 @@ WORKDIR /
 ####################
 # setup-groonga
 ####################
-FROM base as groonga
+FROM base AS groonga
 
 WORKDIR /nixpg
 
@@ -196,7 +194,7 @@ WORKDIR /
 # ####################
 # # Build Apache AGE
 # ####################
-FROM base as age-builder
+FROM base AS age-builder
 ARG age_ref
 ENV PG_CONFIG_PATH=${POLARDB_HOME}/bin/pg_config
 
@@ -208,9 +206,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libreadline-dev \
     zlib1g-dev \
+    clang-15 \
+    llvm-15 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN set -euo pipefail; \
+RUN ln -sf /usr/bin/clang-15 /usr/bin/clang && \
+    ln -sf /usr/bin/llvm-config-15 /usr/bin/llvm-config
+
+RUN bash -c 'set -euo pipefail; \
     git clone --depth 1 --branch "$age_ref" https://github.com/apache/age.git /tmp/age; \
     cd /tmp/age; \
     PG_CONFIG="$PG_CONFIG_PATH" make; \
@@ -220,13 +223,13 @@ RUN set -euo pipefail; \
     sharedir=$($PG_CONFIG_PATH --sharedir); \
     cp "$pkglibdir/age.so" /tmp/age-artifacts/lib/; \
     cp "$sharedir/extension"/age* /tmp/age-artifacts/extension/; \
-    rm -rf /tmp/age
+    rm -rf /tmp/age'
 
 WORKDIR /
 # ####################
 # # Download gosu for easy step-down from root
 # ####################
-FROM base as gosu
+FROM base AS gosu
 ARG TARGETARCH=amd64
 # Install dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -249,7 +252,7 @@ RUN gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys $GOSU_GPG_KEY &&
 # ####################
 # # Build final image
 # ####################
-FROM gosu as production
+FROM gosu AS production
 ENV POLARDB_HOME=/u01/polardb_pg
 ENV PATH="${POLARDB_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${POLARDB_HOME}/lib"
