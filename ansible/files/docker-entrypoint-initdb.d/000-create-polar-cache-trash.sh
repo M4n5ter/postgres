@@ -9,8 +9,13 @@ fi
 # Ensure polar_cache_trash exists to avoid PolarDB WARN spam
 mkdir -p "${PGDATA}/polar_cache_trash"
 
-# Force default port back to 5432 (PolarDB binary defaults to 35504)
-CONF_FILE="${PGDATA}/postgresql.conf"
-if [ -w "$CONF_FILE" ]; then
-  echo "port = 5432" >> "$CONF_FILE"
-fi
+# Disable Polar resource manager to avoid noisy "Failed to get the instance memory usage" warnings
+append_disable_resource_manager() {
+  local conf_file="$1"
+  if [ -w "$conf_file" ] && ! grep -q '^polar_resource_manager\.enable_resource_manager' "$conf_file"; then
+    echo "polar_resource_manager.enable_resource_manager=off" >> "$conf_file"
+  fi
+}
+
+append_disable_resource_manager "${PGDATA}/postgresql.conf"
+append_disable_resource_manager "/etc/postgresql/postgresql.conf"
