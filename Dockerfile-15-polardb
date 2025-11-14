@@ -37,6 +37,7 @@ ARG index_advisor_release=0.2.0
 ARG supautils_release=2.2.0
 ARG wal_g_release=2.0.1
 ARG TARGETARCH=amd64
+ARG age_ref=release/PG15/1.5.0
 ARG polardb_deb_url_amd64=https://github.com/ApsaraDB/PolarDB-for-PostgreSQL/releases/download/v15.14.5.0/PolarDB_15.14.5.0-b4011ae4-ubuntu24.04_amd64.deb
 ARG polardb_deb_url_arm64=https://github.com/ApsaraDB/PolarDB-for-PostgreSQL/releases/download/v15.14.5.0/PolarDB_15.14.5.0-b4011ae4-ubuntu24.04_arm64.deb
 
@@ -63,7 +64,7 @@ extra-substituters = https://nix-postgres-artifacts.s3.amazonaws.com
 extra-trusted-public-keys = nix-postgres-artifacts:dGZlQOvKcNEjvT7QEAJbcV6b6uk7VF/hWMjhYleiaLI=
 EOF
 RUN curl -L https://releases.nixos.org/nix/nix-2.32.2/install | sh -s -- --daemon --no-channel-add --yes --nix-extra-conf-file /tmp/extra-nix.conf
-ENV PATH "${PATH}:/nix/var/nix/profiles/default/bin"
+ENV PATH="${PATH}:/nix/var/nix/profiles/default/bin"
 
 COPY . /nixpg
 
@@ -77,8 +78,8 @@ RUN nix store gc
 WORKDIR /
 
 
-ENV POLARDB_HOME /u01/polardb_pg
-ENV NIX_PROFILE_DIR /nix/var/nix/profiles/default
+ENV POLARDB_HOME=/u01/polardb_pg
+ENV NIX_PROFILE_DIR=/nix/var/nix/profiles/default
 
 RUN bash -c 'set -euo pipefail; \
     arch="${TARGETARCH:-amd64}"; \
@@ -161,7 +162,7 @@ RUN apt-get update && \
     checkinstall \
     cmake 
 
-ENV PGDATA /var/lib/postgresql/data
+ENV PGDATA=/var/lib/postgresql/data
 RUN mkdir -p ${PGDATA}/polar_cache_trash \
     && chown postgres:postgres ${PGDATA}/polar_cache_trash
 
@@ -193,6 +194,36 @@ RUN nix store gc
 
 WORKDIR /
 # ####################
+# # Build Apache AGE
+# ####################
+FROM base as age-builder
+ARG age_ref
+ENV PG_CONFIG_PATH=${POLARDB_HOME}/bin/pg_config
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    flex \
+    bison \
+    ca-certificates \
+    libreadline-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -euo pipefail; \
+    git clone --depth 1 --branch "$age_ref" https://github.com/apache/age.git /tmp/age; \
+    cd /tmp/age; \
+    PG_CONFIG="$PG_CONFIG_PATH" make; \
+    PG_CONFIG="$PG_CONFIG_PATH" make install; \
+    mkdir -p /tmp/age-artifacts/lib /tmp/age-artifacts/extension; \
+    pkglibdir=$($PG_CONFIG_PATH --pkglibdir); \
+    sharedir=$($PG_CONFIG_PATH --sharedir); \
+    cp "$pkglibdir/age.so" /tmp/age-artifacts/lib/; \
+    cp "$sharedir/extension"/age* /tmp/age-artifacts/extension/; \
+    rm -rf /tmp/age
+
+WORKDIR /
+# ####################
 # # Download gosu for easy step-down from root
 # ####################
 FROM base as gosu
@@ -219,13 +250,17 @@ RUN gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys $GOSU_GPG_KEY &&
 # # Build final image
 # ####################
 FROM gosu as production
-ENV POLARDB_HOME /u01/polardb_pg
-ENV PATH "${POLARDB_HOME}/bin:${PATH}"
-ENV LD_LIBRARY_PATH "${POLARDB_HOME}/lib"
+ENV POLARDB_HOME=/u01/polardb_pg
+ENV PATH="${POLARDB_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${POLARDB_HOME}/lib"
 RUN id postgres || (echo "postgres user does not exist" && exit 1)
 # # Setup extensions
 COPY --from=walg /tmp/wal-g /usr/local/bin/
 COPY --from=groonga /tmp/groonga-plugins/plugins /usr/lib/groonga/plugins
+COPY --from=age-builder /tmp/age-artifacts/lib/age.so ${POLARDB_HOME}/lib/
+COPY --from=age-builder /tmp/age-artifacts/extension/age* ${POLARDB_HOME}/share/extension/
+RUN chown postgres:postgres ${POLARDB_HOME}/lib/age.so && \
+    chown postgres:postgres ${POLARDB_HOME}/share/extension/age*
 
 # # Initialise configs
 COPY --chown=postgres:postgres ansible/files/postgresql_config/postgresql.conf.j2 /etc/postgresql/postgresql.conf
@@ -274,24 +309,24 @@ HEALTHCHECK --interval=2s --timeout=2s --retries=10 CMD pg_isready -U postgres -
 STOPSIGNAL SIGINT
 EXPOSE 5432
 
-ENV POSTGRES_HOST /var/run/postgresql
-ENV POSTGRES_USER supabase_admin
-ENV POSTGRES_DB postgres
-ENV PGPORT 5432
+ENV POSTGRES_HOST=/var/run/postgresql
+ENV POSTGRES_USER=supabase_admin
+ENV POSTGRES_DB=postgres
+ENV PGPORT=5432
 RUN apt-get update && apt-get install -y --no-install-recommends \
     locales \
     && rm -rf /var/lib/apt/lists/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8 \
     && localedef -i C -c -f UTF-8 -A /usr/share/locale/locale.alias C.UTF-8 
 RUN echo "C.UTF-8 UTF-8" > /etc/locale.gen && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen && locale-gen
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US:en
-ENV LC_ALL en_US.UTF-8
-ENV LOCALE_ARCHIVE /usr/lib/locale/locale-archive
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+ENV LOCALE_ARCHIVE=/usr/lib/locale/locale-archive
 RUN mkdir -p /usr/share/postgresql/extension/ && \
     ln -s /usr/lib/postgresql/bin/pgsodium_getkey.sh /usr/share/postgresql/extension/pgsodium_getkey && \
     chmod +x /usr/lib/postgresql/bin/pgsodium_getkey.sh
 
-ENV GRN_PLUGINS_DIR /usr/lib/groonga/plugins
+ENV GRN_PLUGINS_DIR=/usr/lib/groonga/plugins
 
 CMD ["postgres", "-D", "/etc/postgresql"]
